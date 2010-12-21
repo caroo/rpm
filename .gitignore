@@ -1,9 +1,6 @@
-.DS\_Store
-.svn/
-*~
-pkg/
-*.gem
-!rails
-Manifest*
-.idea/
-tmp/
+.*sw[pon]
+.bundle
+.rvmrc
+coverage*
+*.DS_Store
+pkg
