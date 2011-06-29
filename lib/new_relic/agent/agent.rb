@@ -4,6 +4,7 @@ require 'net/http'
 require 'logger'
 require 'zlib'
 require 'stringio'
+require 'new_relic/data_serialization'
 
 module NewRelic
   module Agent
@@ -63,6 +64,19 @@ module NewRelic
         attr_reader :metric_ids
         attr_reader :url_rules
         attr_reader :beacon_configuration
+
+        def unsent_errors_size
+          @unsent_errors.length if @unsent_errors
+        end
+
+        def unsent_traces_size
+          @traces.length if @traces
+        end
+
+        def unsent_timeslice_data
+          @unsent_timeslice_data ||= {}
+          @unsent_timeslice_data.keys.length
+        end
 
         def record_transaction(duration_seconds, options={})
           is_error = options['is_error'] || options['error_message'] || options['exception']
@@ -150,9 +164,11 @@ module NewRelic
         end
 
         # Attempt a graceful shutdown of the agent.
-        def shutdown
+        def shutdown(options={})
+          run_loop_before_exit = options.fetch(:force_send, false)
           return if not started?
           if @worker_loop
+            @worker_loop.run_task if run_loop_before_exit
             @worker_loop.stop
 
             log.debug "Starting Agent shutdown"
@@ -280,7 +296,7 @@ module NewRelic
           end
 
           def log_sql_transmission_warning?
-            log_if((@record_sql == :raw), :warn, "Agent is configured to send raw SQL to RPM service")
+            log_if((@record_sql == :raw), :warn, "Agent is configured to send raw SQL to the service")
           end
 
           def sampler_config
@@ -338,7 +354,7 @@ module NewRelic
           end
 
           def log_version_and_pid
-            log.info "New Relic RPM Agent #{NewRelic::VERSION::STRING} Initialized: pid = #{$$}"
+            log.info "New Relic Ruby Agent #{NewRelic::VERSION::STRING} Initialized: pid = #{$$}"
           end
 
           def log_if(boolean, level, message)
@@ -431,8 +447,9 @@ module NewRelic
           def create_and_run_worker_loop
             @worker_loop = WorkerLoop.new
             @worker_loop.run(@report_period) do
-              harvest_and_send_slowest_sample if @should_send_samples
-              harvest_and_send_errors if error_collector.enabled
+              NewRelic::Agent.load_data
+              harvest_and_send_errors
+              harvest_and_send_slowest_sample
               harvest_and_send_timeslice_data
             end
           end
@@ -452,7 +469,7 @@ module NewRelic
             # when a disconnect is requested, stop the current thread, which
             # is the worker thread that gathers data and talks to the
             # server.
-            log.error "RPM forced this agent to disconnect (#{error.message})"
+            log.error "New Relic forced this agent to disconnect (#{error.message})"
             disconnect
           end
 
@@ -505,7 +522,7 @@ module NewRelic
         #
         # See #connect for a description of connection_options.
         def start_worker_thread(connection_options = {})
-          log.debug "Creating RPM worker thread."
+          log.debug "Creating Ruby Agent worker thread."
           @worker_thread = Thread.new do
             deferred_work!(connection_options)
           end # thread new
@@ -555,7 +572,7 @@ module NewRelic
           end
 
           def log_error(error)
-            log.error "Error establishing connection with New Relic RPM Service at #{control.server}: #{error.message}"
+            log.error "Error establishing connection with New Relic Service at #{control.server}: #{error.message}"
             log.debug error.backtrace.join("\n")
           end
 
@@ -606,7 +623,7 @@ module NewRelic
                       else
                         error_collector.enabled = false
                       end
-            log.debug "Errors will #{enabled ? '' : 'not '}be sent to the RPM service."
+            log.debug "Errors will #{enabled ? '' : 'not '}be sent to the New Relic service."
           end
 
           def enable_random_samples!(sample_rate)
@@ -627,7 +644,7 @@ module NewRelic
               enable_random_samples!(sample_rate) if @should_send_random_samples
               log.debug "Transaction tracing threshold is #{@slowest_transaction_threshold} seconds."
             else
-              log.debug "Transaction traces will not be sent to the RPM service."
+              log.debug "Transaction traces will not be sent to the New Relic service."
             end
           end
 
@@ -662,6 +679,37 @@ module NewRelic
         end
         include Connect
 
+        def serialize
+          accumulator = []
+          accumulator[1] = harvest_transaction_traces if @transaction_sampler
+          accumulator[2] = harvest_errors if @error_collector
+          accumulator[0] = harvest_timeslice_data
+          accumulator
+        end
+
+        public :serialize
+
+        def merge_data_from(data)
+          metrics, transaction_traces, errors = data
+          @stats_engine.merge_data(metrics) if metrics
+          if transaction_traces
+            if @traces
+              @traces = @traces + transaction_traces
+            else
+              @traces = transaction_traces
+            end
+          end
+          if errors
+            if @unsent_errors
+              @unsent_errors = @unsent_errors + errors
+            else
+              @unsent_errors = errors
+            end
+          end
+        end
+
+        public :merge_data_from
+
         # Connect to the server and validate the license.  If successful,
         # @connected has true when finished.  If not successful, you can
         # keep calling this.  Return false if we could not establish a
@@ -677,7 +725,7 @@ module NewRelic
         #   later (default true).
         # * <tt>force_reconnect => true</tt> if you want to establish a new connection
         #   to the server before running the worker loop.  This means you get a separate
-        #   agent run and RPM sees it as a separate instance (default is false).
+        #   agent run and New Relic sees it as a separate instance (default is false).
         def connect(options)
           # Don't proceed if we already connected (@connected=true) or if we tried
           # to connect and were rejected with prejudice because of a license issue
@@ -688,7 +736,7 @@ module NewRelic
           @connect_retry_period = should_keep_retrying?(options) ? 10 : 0
 
           sleep connect_retry_period
-          log.debug "Connecting Process to RPM: #$0"
+          log.debug "Connecting Process to New Relic: #$0"
           query_server_for_configuration
           @connected_pid = $$
           @connected = true
@@ -715,32 +763,39 @@ module NewRelic
           $0 =~ /ApplicationSpawner|^unicorn\S* master/
         end
 
-        def harvest_and_send_timeslice_data
-
+        def harvest_timeslice_data(time=Time.now)
+          # this creates timeslices that are harvested below
           NewRelic::Agent::BusyCalculator.harvest_busy
-
-          now = Time.now
-          NewRelic::Agent.instance.stats_engine.get_stats_no_scope('Supportability/invoke_remote').record_data_point(0.0)
-          NewRelic::Agent.instance.stats_engine.get_stats_no_scope('Supportability/invoke_remote/metric_data').record_data_point(0.0)
 
           @unsent_timeslice_data ||= {}
           @unsent_timeslice_data = @stats_engine.harvest_timeslice_data(@unsent_timeslice_data, @metric_ids)
+          @unsent_timeslice_data
+        end
 
+        def fill_metric_id_cache(pairs_of_specs_and_ids)
+          Array(pairs_of_specs_and_ids).each do |metric_spec, metric_id|
+            @metric_ids[metric_spec] = metric_id
+          end
+        end
+
+        def harvest_and_send_timeslice_data
+          now = Time.now
+          NewRelic::Agent.instance.stats_engine.get_stats_no_scope('Supportability/invoke_remote').record_data_point(0.0)
+          NewRelic::Agent.instance.stats_engine.get_stats_no_scope('Supportability/invoke_remote/metric_data').record_data_point(0.0)
+          harvest_timeslice_data(now)
           begin
             # In this version of the protocol, we get back an assoc array of spec to id.
-            metric_ids = invoke_remote(:metric_data, @agent_id,
+            metric_specs_and_ids = invoke_remote(:metric_data, @agent_id,
                                        @last_harvest_time.to_f,
                                        now.to_f,
                                        @unsent_timeslice_data.values)
 
           rescue Timeout::Error
             # assume that the data was received. chances are that it was
-            metric_ids = nil
+            metric_specs_and_ids = []
           end
 
-          metric_ids.each do | spec, id |
-            @metric_ids[spec] = id
-          end if metric_ids
+          fill_metric_id_cache(metric_specs_and_ids)
 
           log.debug "#{now}: sent #{@unsent_timeslice_data.length} timeslices (#{@agent_id}) in #{Time.now - now} seconds"
 
@@ -754,9 +809,13 @@ module NewRelic
           # then the metric data is downsampled for another timeslices
         end
 
-        def harvest_and_send_slowest_sample
+        def harvest_transaction_traces
           @traces = @transaction_sampler.harvest(@traces, @slowest_transaction_threshold)
+          @traces
+        end
 
+        def harvest_and_send_slowest_sample
+          harvest_transaction_traces
           unless @traces.empty?
             now = Time.now
             log.debug "Sending (#{@traces.length}) transaction traces"
@@ -792,8 +851,13 @@ module NewRelic
           # sample.
         end
 
-        def harvest_and_send_errors
+        def harvest_errors
           @unsent_errors = @error_collector.harvest_errors(@unsent_errors)
+          @unsent_errors
+        end
+
+        def harvest_and_send_errors
+          harvest_errors
           if @unsent_errors && @unsent_errors.length > 0
             log.debug "Sending #{@unsent_errors.length} errors"
             begin
@@ -859,7 +923,7 @@ module NewRelic
               response = http.request(request)
             end
           rescue Timeout::Error
-            log.warn "Timed out trying to post data to RPM (timeout = #{@request_timeout} seconds)" unless @request_timeout < 30
+            log.warn "Timed out trying to post data to New Relic (timeout = #{@request_timeout} seconds)" unless @request_timeout < 30
             raise
           end
           if response.is_a? Net::HTTPServiceUnavailable
@@ -925,17 +989,25 @@ module NewRelic
           raise NewRelic::Agent::ServerConnectionException, "Recoverable error connecting to the server: #{e}"
         ensure
           NewRelic::Agent.instance.stats_engine.get_stats_no_scope('Supportability/invoke_remote').record_data_point((Time.now - now).to_f)
-          NewRelic::Agent.instance.stats_engine.get_stats_no_scope('Supportability/invoke_remote/' + method.to_s).record_data_point((Time.now - now).to_f)          
+          NewRelic::Agent.instance.stats_engine.get_stats_no_scope('Supportability/invoke_remote/' + method.to_s).record_data_point((Time.now - now).to_f)
         end
 
         def graceful_disconnect
           if @connected
             begin
               @request_timeout = 10
-              log.debug "Flushing unsent metric data to server"
-              @worker_loop.run_task
+              if NewRelic::DataSerialization.should_send_data?
+                log.debug "Sending data to New Relic Service"
+                NewRelic::Agent.load_data
+                harvest_and_send_errors
+                harvest_and_send_slowest_sample
+                harvest_and_send_timeslice_data
+              else
+                log.debug "Serializing agent data to disk"
+                NewRelic::Agent.save_data
+              end
               if @connected_pid == $$
-                log.debug "Sending RPM service agent run shutdown message"
+                log.debug "Sending New Relic service agent run shutdown message"
                 invoke_remote :shutdown, @agent_id, Time.now.to_f
               else
                 log.debug "This agent connected from parent process #{@connected_pid}--not sending shutdown"

@@ -7,10 +7,10 @@ module NewRelic
       def browser_timing_header
         return "" if NewRelic::Agent.instance.beacon_configuration.nil?
         return "" if !NewRelic::Agent.is_transaction_traced? || !NewRelic::Agent.is_execution_traced?
-        
+
         NewRelic::Agent.instance.beacon_configuration.browser_timing_header
       end
-      
+
       def browser_timing_footer
         config = NewRelic::Agent.instance.beacon_configuration
         return "" if config.nil? || !config.rum_enabled || config.browser_monitoring_key.nil?
@@ -25,8 +25,8 @@ module NewRelic
           config = NewRelic::Agent.instance.beacon_configuration
           application_id = config.application_id
           beacon = config.beacon
-          license_key = config.browser_monitoring_key          
-          
+          license_key = config.browser_monitoring_key
+
           footer_js_string(beacon, license_key, application_id)
         else
           ''
@@ -36,7 +36,7 @@ module NewRelic
       def browser_monitoring_transaction_name
         Thread.current[:newrelic_most_recent_transaction] || "<unknown>"
       end
-      
+
       def browser_monitoring_start_time
         Thread.current[:newrelic_start_time]
       end
@@ -56,7 +56,7 @@ module NewRelic
 
       def footer_js_string(beacon, license_key, application_id)
         obfuscated_transaction_name = obfuscate(browser_monitoring_transaction_name)
-        html_safe_if_needed("<script>#{NewRelic::Agent.instance.beacon_configuration.browser_timing_static_footer}NREUMQ.push([\"nrf2\",\"#{beacon}\",\"#{license_key}\",#{application_id},\"#{obfuscated_transaction_name}\",#{browser_monitoring_queue_time},#{browser_monitoring_app_time},new Date().getTime()])</script>")
+        html_safe_if_needed("<script type=\"text/javascript\">#{NewRelic::Agent.instance.beacon_configuration.browser_timing_static_footer}NREUMQ.push([\"nrf2\",\"#{beacon}\",\"#{license_key}\",#{application_id},\"#{obfuscated_transaction_name}\",#{browser_monitoring_queue_time},#{browser_monitoring_app_time},new Date().getTime()])</script>")
       end
 
       def html_safe_if_needed(string)
@@ -66,7 +66,7 @@ module NewRelic
           string
         end
       end
-      
+
       def obfuscate(text)
         obfuscated = ""
         key_bytes = NewRelic::Agent.instance.beacon_configuration.license_bytes

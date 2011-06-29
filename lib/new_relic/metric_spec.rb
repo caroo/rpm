@@ -26,7 +26,7 @@ class NewRelic::MetricSpec
     self.class == o.class &&
     name.eql?(o.name) &&
     # coerce scope to a string and compare
-     (scope || '') == (o.scope || '')
+     scope.to_s == o.scope.to_s
   end
 
   def hash
@@ -37,6 +37,7 @@ class NewRelic::MetricSpec
   # return a new metric spec if the given regex
   # matches the name or scope.
   def sub(pattern, replacement, apply_to_scope = true)
+    NewRelic::Control.instance.log.warn("The sub method on metric specs is deprecated") rescue nil
     return nil if name !~ pattern &&
      (!apply_to_scope || scope.nil? || scope !~ pattern)
     new_name = name.sub(pattern, replacement)[0...MAX_LENGTH]
@@ -51,7 +52,12 @@ class NewRelic::MetricSpec
   end
 
   def to_s
+    return name if scope.empty?
     "#{name}:#{scope}"
+  end
+
+  def inspect
+    "#<NewRelic::MetricSpec '#{name}':'#{scope}'>"
   end
 
   def to_json(*a)

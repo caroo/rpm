@@ -189,7 +189,7 @@ class NewRelic::Agent::AgentTestControllerTest < ActionController::TestCase
                 'Middleware/all',
                 'WebFrontend/WebServer/all']
 
-    compare_metrics metrics, engine.metrics.reject{|m| m.index('Response')==0 || m.index('CPU')==0}
+    compare_metrics metrics, engine.metrics.reject{|m| m.index('Response')==0 || m.index('CPU')==0 || m.index('GC')==0}
     assert_equal 1, engine.get_stats_no_scope("Controller/new_relic/agent/agent_test/action_with_before_filter_error").call_count
     assert_equal 1, engine.get_stats_no_scope("Errors/all").call_count
     apdex = engine.get_stats_no_scope("Apdex")
@@ -232,12 +232,12 @@ class NewRelic::Agent::AgentTestControllerTest < ActionController::TestCase
     engine = @agent.stats_engine
     get :entry_action
     assert_nil Thread.current[:newrelic_ignore_controller]
-    assert_nil engine.lookup_stat('Controller/agent_test/entry_action')
-    assert_nil engine.lookup_stat('Controller/agent_test_controller/entry_action')
-    assert_nil engine.lookup_stat('Controller/AgentTestController/entry_action')
-    assert_nil engine.lookup_stat('Controller/NewRelic::Agent::AgentTestController/internal_action')
-    assert_nil engine.lookup_stat('Controller/NewRelic::Agent::AgentTestController_controller/internal_action')
-    assert_not_nil engine.lookup_stat('Controller/NewRelic::Agent::AgentTestController/internal_traced_action')
+    assert_nil engine.lookup_stats('Controller/agent_test/entry_action')
+    assert_nil engine.lookup_stats('Controller/agent_test_controller/entry_action')
+    assert_nil engine.lookup_stats('Controller/AgentTestController/entry_action')
+    assert_nil engine.lookup_stats('Controller/NewRelic::Agent::AgentTestController/internal_action')
+    assert_nil engine.lookup_stats('Controller/NewRelic::Agent::AgentTestController_controller/internal_action')
+    assert_not_nil engine.lookup_stats('Controller/NewRelic::Agent::AgentTestController/internal_traced_action')
   end
   def test_action_instrumentation
     begin
@@ -271,23 +271,24 @@ class NewRelic::Agent::AgentTestControllerTest < ActionController::TestCase
     engine.clear_stats
 
     assert_equal 0, NewRelic::Agent::BusyCalculator.busy_count
-    get :index, 'social_security_number' => "001-555-1212", 'wait' => '1.0'
+    get :index, 'social_security_number' => "001-555-1212", 'wait' => '0.05'
     NewRelic::Agent::BusyCalculator.harvest_busy
 
     assert_equal 1, stats('Instance/Busy').call_count
     assert_equal 1, stats('HttpDispatcher').call_count
     # We are probably busy about 99% of the time, but lets make sure it's at least 50
-    assert stats('Instance/Busy').total_call_time > 0.5, stats('Instance/Busy').inspect
+    assert stats('Instance/Busy').total_call_time > (0.5 * 0.05), stats('Instance/Busy').inspect
     assert_equal 0, stats('WebFrontend/Mongrel/Average Queue Time').call_count
   end
 
   def test_histogram
     engine.clear_stats
     get :index, 'social_security_number' => "001-555-1212"
+    stats_engine = NewRelic::Agent.instance.stats_engine
     bucket = NewRelic::Agent.instance.stats_engine.metrics.find { | m | m =~ /^Response Times/ }
-    assert_not_nil bucket
+    assert_not_nil bucket, "Bucket contents: #{bucket.inspect}, #{stats_engine.metrics.inspect}"
     bucket_stats = stats(bucket)
-    assert_equal 1, bucket_stats.call_count
+    assert_equal 1, bucket_stats.call_count, "expected the bucket to have a call, but instead got: #{bucket_stats.inspect}"
   end
 
   def test_queue_headers_no_header
