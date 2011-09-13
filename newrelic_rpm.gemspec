@@ -126,6 +126,7 @@ Gem::Specification.new do |s|
     "lib/tasks/install.rake",
     "lib/tasks/tests.rake",
     "newrelic.yml",
+    "newrelic_rpm.gemspec",
     "recipes/newrelic.rb",
     "test/active_record_fixtures.rb",
     "test/config/newrelic.yml",
