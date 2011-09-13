@@ -234,7 +234,7 @@ module NewRelic
 
           # Skip instrumentation based on the value of 'do_not_trace' and if
           # we aren't calling directly with a block.
-          if !block_given? && do_not_trace?
+          if !block && do_not_trace?
             # Also ignore all instrumentation in the call sequence
             NewRelic::Agent.disable_all_tracing do
               return perform_action_without_newrelic_trace(*args)
@@ -249,8 +249,8 @@ module NewRelic
               frame_data.start_transaction
               begin
                 NewRelic::Agent::BusyCalculator.dispatcher_start frame_data.start
-                if block_given?
-                  yield
+                if block
+                  block.call
                 else
                   perform_action_without_newrelic_trace(*args)
                 end

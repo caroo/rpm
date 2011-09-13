@@ -11,3 +11,8 @@ tmp/
 
 /log/
 /lerg/
+.*sw[pon]
+.bundle
+.rvmrc
+coverage*
+pkg
